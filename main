@@ -1,0 +1,210 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+using Unity.Entities;
+using Unity.Mathematics;
+using Unity.Transforms;
+using Unity.Rendering;
+using Unity.Jobs;
+using Unity.Burst;
+using Unity.Collections;
+using System.Text;
+
+
+[UpdateAfter(typeof(UnityEngine.Experimental.PlayerLoop.Initialization))]
+public class Main : ComponentSystem {
+    protected override void OnUpdate()
+    {
+       
+    }
+  
+    protected override void OnStartRunning()
+    {
+        Debug.Log("main OnStart");
+        GameObject SCube = GameObject.Find( "Cube" );//这边可以换成资源加载的代码 
+        Mesh SMesh = SCube.GetComponent<MeshFilter>().mesh;
+        Material SMaterial = SCube.GetComponent<MeshRenderer>().material; ;
+        List<Material> matLst = new List<Material>();
+        
+        EntityManager Manager = World.Active.GetOrCreateManager<EntityManager>();
+
+        for( int i = 0 ; i < 6666 ; i++ ) {
+            Entity Cube = Manager.CreateEntity();
+            Vector3 rdPos = UnityEngine.Random.insideUnitSphere;
+            //float3 RandomPos = new float3( UnityEngine.Random.value * 100 - 50 , UnityEngine.Random.value * 100 - 50 , UnityEngine.Random.value * 100 - 50 );
+            //
+
+            Manager.AddComponentData(Cube, new Position { Value = rdPos*50 });
+            //
+            Manager.AddComponentData(Cube, new Rotation { Value = Quaternion.Euler(float3.zero) });
+            //
+            Manager.AddSharedComponentData(Cube, new MeshInstanceRenderer
+            {
+                mesh = SMesh,
+                material = SMaterial,
+                castShadows = UnityEngine.Rendering.ShadowCastingMode.Off,
+                receiveShadows = false,
+                
+            });
+            //
+
+            Manager.AddComponentData(Cube, new RotSpeed { Value = UnityEngine.Random.value });
+            Manager.AddComponentData(Cube, new TestStruct { testNum = 0 });
+        }
+
+        Object.Destroy(SCube);
+
+
+    }
+}
+
+//
+public struct RotSpeed : IComponentData {
+    public float Value;
+}
+//public class RotSpeedComponent : ComponentDataWrapper<RotSpeed> { }
+
+
+//public class RotSystem2 : ComponentSystem
+//{
+
+//    struct CubeGroup
+//    {
+//        [ReadOnly] public readonly int Length;//会在实例被inject时 自动获取？
+//        public ComponentDataArray<Rotation> rotation;//应该是了 这两个Array其实也算是自动获取的
+//        [ReadOnly] public ComponentDataArray<RotSpeed> rotSpeed;
+//    }
+//    [Inject] CubeGroup Cubes;
+
+//    protected override void OnUpdate()
+//    {
+
+//        int length = Cubes.Length;
+
+//        for (int i = 0; i < length; i++)
+//        {
+//            //-------模拟耗时操作
+//            float R = 0F;
+//            Unity.Mathematics.Random RR = new Unity.Mathematics.Random(1);
+//            for (int j = 0; j < 1000; j++) R += RR.NextFloat();
+//            R /= 1000;
+//            //-------
+//            Cubes.rotation[i] = new Rotation { Value = Quaternion.Euler(new float3(0, Time.realtimeSinceStartup * 100 * Cubes.rotSpeed[i].Value, 0)) };
+//        }
+
+//    }
+//}
+public struct TestStruct : IComponentData
+{
+    public int testNum;
+}
+
+public class MoveSystem : JobComponentSystem
+{
+    //public static int testStatic = 1;//job无法访问static变量
+
+    struct CubeGroup
+    {
+        [ReadOnly] public readonly int Length;
+
+        //你得保证这个世界上有同时拥有以下三种component的Entity
+        //否则 将会没有任何Entity注入到此System中
+        
+        public ComponentDataArray<TestStruct> tests;
+        public ComponentDataArray<Position> position;
+        [ReadOnly] public ComponentDataArray<RotSpeed> rotSpeed;//当moveSpeed用
+    }
+    [Inject] CubeGroup Cubes;
+
+    //NativeArray<TestStruct> tests ;    
+    [BurstCompile]
+    struct MoveJob : IJobParallelFor
+    {
+
+        [ReadOnly] public Position leader;//readOnly job执行中只需要读取的东西
+        [ReadOnly] public ComponentDataArray<RotSpeed> rotSpeed;
+        public ComponentDataArray<Position> position;//没有readonly  job执行中需要修改的东西
+        [ReadOnly] public float NowTime;
+        public ComponentDataArray<TestStruct> test;
+        //规律 job里面有什么 外面就有什么 因为在new这个job的时候 需要给job的这些东西赋值
+        //------
+        public void Execute(int i)
+        {
+            //float R = 0F;
+            //Unity.Mathematics.Random RR = new Unity.Mathematics.Random(1);
+            //for (int j = 0; j < 10000; j++) R += RR.NextFloat();
+            //R /= 10000;
+            Vector3 value = position[i].Value;
+            Vector3 directionMove = (Vector3)leader.Value - value;
+            directionMove = Vector3.Cross(Vector3.up, directionMove);
+            directionMove = Vector3.Normalize(directionMove);
+            position[i] = new Position { Value = value + directionMove * (rotSpeed[i].Value) };
+            test[i] = new TestStruct { testNum = i };
+        }
+    }
+    public Transform Leader;//还不是很确定system里放非component数据是否影响性能 但目前来看并没有什么卵关系
+    protected override void OnStartRunning()
+    {
+        base.OnStartRunning();
+        Leader = GameObject.Find("Leader").transform;
+    }
+
+    protected override JobHandle OnUpdate(JobHandle inputDeps)//1 这种操作就是在一帧中的每个update之间传递了一个job链
+    {       
+        int length = Cubes.Length;
+        MoveJob OneJob = new MoveJob { position = Cubes.position, rotSpeed = Cubes.rotSpeed, NowTime = Time.realtimeSinceStartup, leader = new Position { Value = Leader.transform.position }, test = Cubes.tests };
+        JobHandle JH = OneJob.Schedule(length, 100, inputDeps);//2
+        Debug.Log(Time.frameCount);
+        return JH;//3
+    }
+    //“ECS会等待这一帧内的所有Job完成后 再迭代到下一帧 忘记mono的update把”。。。但是似乎并不是 因为上面输出的Time.FrameCount和mono的update同步，并搞不懂这个情形，大佬说啥就是啥把...
+
+
+}
+public class RotSystem : JobComponentSystem
+{
+    protected override void OnStartRunning()
+    {
+        base.OnStartRunning();
+        Debug.Log("rot running");
+    }
+
+    struct CubeGroup
+    {
+        [ReadOnly] public readonly int Length;
+        public ComponentDataArray<Rotation> rotation;
+        [ReadOnly] public ComponentDataArray<RotSpeed> rotSpeed;
+    }
+    [Inject] CubeGroup Cubes;
+
+    [BurstCompile]
+    struct RotJob : IJobParallelFor
+    {
+
+        [ReadOnly] public ComponentDataArray<RotSpeed> rotSpeed;
+        public ComponentDataArray<Rotation> rotation;
+        [ReadOnly] public float NowTime;
+
+        public void Execute(int i)
+        {
+            //-----耗时操作
+            float R = 0F;
+            Unity.Mathematics.Random RR = new Unity.Mathematics.Random(1);
+            for (int j = 0; j < 10000; j++) R += RR.NextFloat();
+            R /= 10000;
+            //-----
+            rotation[i] = new Rotation { Value = Quaternion.Euler(new float3(0, NowTime * 100f * (rotSpeed[i].Value*20f-10f), 0)) };
+        }
+    }
+
+    protected override JobHandle OnUpdate(JobHandle inputDeps)
+    {
+
+        int length = Cubes.Length;
+        RotJob OneJob = new RotJob { rotation = Cubes.rotation, rotSpeed = Cubes.rotSpeed, NowTime = Time.realtimeSinceStartup };
+
+        JobHandle JH = OneJob.Schedule(length, 100, inputDeps);
+        return JH;
+    }
+}
